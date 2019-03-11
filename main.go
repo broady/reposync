@@ -2,10 +2,11 @@
 // Use of this source code is governed by the Apache 2.0
 // license that can be found in the LICENSE file.
 
-package main
+package main // import "github.com/broady/reposync"
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -17,10 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/context"
 	"golang.org/x/time/rate"
-
-	"google.golang.org/appengine"
 
 	"cloud.google.com/go/compute/metadata"
 )
@@ -34,6 +32,7 @@ type job struct {
 
 	// Status reporting
 	mu            sync.Mutex
+	lastOK        time.Time // last healthy status
 	statusTime    time.Time // time status was set
 	statusOK      bool      // normal state?
 	statusMessage string    // status indicator, suitable for public use
@@ -75,7 +74,11 @@ func main() {
 
 	http.HandleFunc("/status", statusz)
 
-	appengine.Main()
+	port := "8080"
+	if p := os.Getenv("PORT"); p != "" {
+		port = p
+	}
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
 // reconcile gets a value from the GCE metadata server if the given string is
@@ -132,7 +135,7 @@ func (j *job) mirror() {
 		ctx := context.Background()
 		limit.Wait(ctx)
 
-		log.Printf("Pulling")
+		j.logf("Pulling")
 		cmd := exec.Command("git", "pull") // TODO: CommandContext once Flex is on 1.7
 		cmd.Dir = j.dir()
 		out, err := cmd.CombinedOutput()
@@ -140,7 +143,7 @@ func (j *job) mirror() {
 			j.statusErr("Pull", err, out)
 			continue
 		}
-		log.Printf("Pulled: %s", out)
+		j.logf("Pulled: %s", out)
 
 		sha, err := ioutil.ReadFile(j.dir() + "/.git/refs/heads/master")
 		if err != nil {
@@ -153,7 +156,7 @@ func (j *job) mirror() {
 			continue
 		}
 
-		log.Printf("Pushing")
+		j.logf("Pushing")
 		cmd = exec.CommandContext(ctx, "git", "push", "--all", "to")
 		cmd.Dir = j.dir()
 		out, err = cmd.CombinedOutput()
@@ -162,7 +165,7 @@ func (j *job) mirror() {
 			continue
 		}
 
-		log.Printf("Pushing tags")
+		j.logf("Pushing tags")
 		cmd = exec.CommandContext(ctx, "git", "push", "--tags", "to")
 		cmd.Dir = j.dir()
 		out, err = cmd.CombinedOutput()
@@ -181,13 +184,9 @@ func statusz(w http.ResponseWriter, r *http.Request) {
 
 	for _, j := range jobs {
 		j.mu.Lock()
-		if !j.statusOK {
-			// Use a 500 for the status to indicate bad health.
+		if time.Since(j.lastOK) > 15*time.Minute {
 			w.WriteHeader(500)
-		}
-		if time.Now().After(j.statusTime.Add(15 * time.Minute)) {
-			w.WriteHeader(500)
-			// Stale. Why? Stalled pull?
+			// Stale. Something went wrong.
 			fmt.Fprintf(w, "Repo %q possibly not fresh\n", j.ID)
 		}
 		j.mu.Unlock()
@@ -196,11 +195,16 @@ func statusz(w http.ResponseWriter, r *http.Request) {
 	for _, j := range jobs {
 		j.mu.Lock()
 		fmt.Fprintln(w, "---- repo", j.ID, "----")
-		fmt.Fprintln(w, "OK", j.statusOK)
-		fmt.Fprintln(w, j.statusTime)
+		fmt.Fprintln(w, "OK now?   ", j.statusOK)
+		fmt.Fprintln(w, "Last OK:  ", j.lastOK)
+		fmt.Fprintln(w, "Last try: ", j.statusTime)
 		fmt.Fprintln(w, j.statusMessage)
 		j.mu.Unlock()
 	}
+}
+
+func (j *job) logf(msg string, v ...interface{}) {
+	log.Printf("["+j.ID+"] "+msg, v...)
 }
 
 func (j *job) ok(msg string, v ...interface{}) {
@@ -217,6 +221,9 @@ func (j *job) status(ok bool, msg string, v ...interface{}) {
 	j.statusOK = ok
 	j.statusMessage = msg
 	j.statusTime = time.Now()
+	if ok {
+		j.lastOK = time.Now()
+	}
 
 	j.mu.Unlock()
 
@@ -240,8 +247,8 @@ func (j *job) status(ok bool, msg string, v ...interface{}) {
 	b = bytes.Replace(b, []byte(j.To), []byte("<REDACTED (TO)>"), -1)
 
 	if ok {
-		log.Printf("OK: %s", b)
+		j.logf("OK: %s", b)
 	} else {
-		log.Printf("FAIL: %s", b)
+		j.logf("FAIL: %s", b)
 	}
 }

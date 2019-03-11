@@ -1,8 +1,9 @@
-# Dockerfile extending the generic Go image with application files for a
-# single application.
-FROM gcr.io/google_appengine/golang
+FROM golang:1.12 as build
+WORKDIR /src/app
+COPY . .
+RUN go build -v .
 
+FROM debian:stretch-slim
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-
-COPY . /go/src/app
-RUN go-wrapper install -tags appenginevm
+COPY --from=build /src/app/reposync /bin/reposync
+CMD ["/bin/reposync"]
