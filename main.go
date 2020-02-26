@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache 2.0
 // license that can be found in the LICENSE file.
 
-package main // import "github.com/broady/reposync"
+package main
 
 import (
 	"bytes"
@@ -72,6 +72,7 @@ func main() {
 		go j.mirror()
 	}
 
+	http.Handle("/", http.RedirectHandler("https://github.com/broady/reposync", http.StatusTemporaryRedirect))
 	http.HandleFunc("/status", statusz)
 
 	port := "8080"
@@ -127,16 +128,16 @@ func (j *job) mirror() {
 		time.Sleep(time.Second)
 	}
 
-	limit := rate.NewLimiter(rate.Every(2*time.Minute), 1)
+	limit := rate.NewLimiter(rate.Every(time.Minute), 1)
 
-	var oldSHA string
+	var oldSHA, oldTags []byte
 
 	for {
 		ctx := context.Background()
 		limit.Wait(ctx)
 
 		j.logf("Pulling")
-		cmd := exec.Command("git", "pull") // TODO: CommandContext once Flex is on 1.7
+		cmd := exec.CommandContext(ctx, "git", "pull")
 		cmd.Dir = j.dir()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -151,31 +152,39 @@ func (j *job) mirror() {
 			continue
 		}
 
-		if string(sha) == oldSHA {
-			j.ok("Synced - nothing to push: " + oldSHA)
-			continue
-		}
-
-		j.logf("Pushing")
-		cmd = exec.CommandContext(ctx, "git", "push", "--all", "to")
+		cmd = exec.CommandContext(ctx, "git", "tag", "-l")
 		cmd.Dir = j.dir()
-		out, err = cmd.CombinedOutput()
+		tags, err := cmd.CombinedOutput()
 		if err != nil {
-			j.statusErr("Push", err, out)
+			j.statusErr("git tag -l", tags)
 			continue
 		}
 
-		j.logf("Pushing tags")
-		cmd = exec.CommandContext(ctx, "git", "push", "--tags", "to")
-		cmd.Dir = j.dir()
-		out, err = cmd.CombinedOutput()
-		if err != nil {
-			j.statusErr("Push tags", err, out)
-			continue
+		if !bytes.Equal(sha, oldSHA) {
+			j.logf("Pushing")
+			cmd = exec.CommandContext(ctx, "git", "push", "--all", "to")
+			cmd.Dir = j.dir()
+			out, err = cmd.CombinedOutput()
+			if err != nil {
+				j.statusErr("Push", err, out)
+				continue
+			}
 		}
 
-		j.ok("Synced - pushed", out)
-		oldSHA = string(sha)
+		if !bytes.Equal(tags, oldTags) {
+			j.logf("Pushing tags")
+			cmd = exec.CommandContext(ctx, "git", "push", "--tags", "to")
+			cmd.Dir = j.dir()
+			out, err = cmd.CombinedOutput()
+			if err != nil {
+				j.statusErr("Push tags", err, out)
+				continue
+			}
+		}
+
+		j.ok("Synced")
+		oldSHA = sha
+		oldTags = tags
 	}
 }
 
@@ -204,7 +213,13 @@ func statusz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (j *job) logf(msg string, v ...interface{}) {
-	log.Printf("["+j.ID+"] "+msg, v...)
+	out := fmt.Sprintf("["+j.ID+"] "+msg, v...)
+
+	// Redact the from/to, just in case there are secrets in the URL (e.g., GitHub token)
+	out = strings.ReplaceAll(out, j.From, "<REDACTED (FROM)>")
+	out = strings.ReplaceAll(out, j.To, "<REDACTED (TO)>")
+
+	log.Println(out)
 }
 
 func (j *job) ok(msg string, v ...interface{}) {
@@ -240,15 +255,9 @@ func (j *job) status(ok bool, msg string, v ...interface{}) {
 		}
 	}
 
-	b := buf.Bytes()
-
-	// Redact the from/to, just in case there are secrets in the URL (e.g., GitHub token)
-	b = bytes.Replace(b, []byte(j.From), []byte("<REDACTED (FROM)>"), -1)
-	b = bytes.Replace(b, []byte(j.To), []byte("<REDACTED (TO)>"), -1)
-
 	if ok {
-		j.logf("OK: %s", b)
+		j.logf("OK: %s", buf.String())
 	} else {
-		j.logf("FAIL: %s", b)
+		j.logf("FAIL: %s", buf.String())
 	}
 }
