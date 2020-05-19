@@ -30,6 +30,8 @@ type job struct {
 	From string
 	To   string
 
+	HTTPCookie string
+
 	// Status reporting
 	mu            sync.Mutex
 	lastOK        time.Time // last healthy status
@@ -99,6 +101,10 @@ func (j *job) dir() string {
 	return "repo-" + j.ID
 }
 
+func (j *job) cookiefile() string {
+	return "cookies-" + j.ID
+}
+
 func (j *job) mirror() {
 	j.ok("Cloning")
 
@@ -113,6 +119,20 @@ func (j *job) mirror() {
 		os.RemoveAll(j.dir())
 		time.Sleep(10 * time.Second)
 		continue
+	}
+
+	if j.HTTPCookie != "" {
+		if err := ioutil.WriteFile(j.cookiefile(), []byte(j.HTTPCookie), 0400); err != nil {
+			j.statusErr("Writing HTTP cookie file", err)
+		}
+		cmd := exec.Command("git", "config", "http.cookiefile", j.cookiefile())
+		cmd.Dir = j.dir()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			j.statusErr("Set cookie file", err, out)
+		} else {
+			j.ok("Set http.cookiefile")
+		}
 	}
 
 	for {

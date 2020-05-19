@@ -7,4 +7,4 @@ manual_scaling:
 env_variables:
   # Read the values from the "from-repo" and "to-repo" project metadata values:
   # https://console.cloud.google.com/compute/metadata
-  REPOS: '[{"ID":"default","From":"metadata:from-repo","To":"metadata:to-repo"}]'
+  REPOS: '[{"ID":"default","From":"metadata:from-repo","To":"metadata:to-repo","HTTPCookie":"..."}]'
